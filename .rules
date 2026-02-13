@@ -155,7 +155,7 @@ If you discover a non-obvious pattern that would help future sessions, include a
 ## High bar for new rules
 Editing or clarifying existing rules is always welcome. New rules must meet **all three** criteria:
 1. **Non-obvious** — someone familiar with the codebase would still get it wrong without the rule.
-2. **Repeatedly encountered** — it came up in more than one session or PR review.
+2. **Repeatedly encountered** — it came up more than once (multiple hits in one session counts).
 3. **Specific enough to act on** — a concrete instruction, not a vague principle.
 
 Rules that apply to a single crate belong in that crate's own `.rules` file, not the repo root.
