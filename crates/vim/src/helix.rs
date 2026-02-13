@@ -5,16 +5,20 @@ mod paste;
 mod select;
 mod surround;
 
-use editor::display_map::DisplaySnapshot;
+use editor::display_map::{DisplayRow, DisplaySnapshot};
+use editor::display_map::Crease;
 use editor::{
-    DisplayPoint, Editor, EditorSettings, HideMouseCursorOrigin, MultiBufferOffset,
-    SelectionEffects, ToOffset, ToPoint, movement,
+    DisplayPoint, Editor, EditorSettings, FoldPlaceholder, HideMouseCursorOrigin,
+    MultiBufferOffset, SelectionEffects, ToOffset, ToPoint, movement,
 };
 use gpui::actions;
 use gpui::{Context, Window};
 use language::{CharClassifier, CharKind, Point};
 use search::{BufferSearchBar, SearchOptions};
 use settings::Settings;
+use std::any::TypeId;
+use std::sync::Arc;
+use theme::ActiveTheme;
 use text::{Bias, SelectionGoal};
 use workspace::searchable::FilteredSearchRange;
 use workspace::searchable::{self, Direction};
@@ -59,6 +63,37 @@ actions!(
         HelixSelectPrevious,
     ]
 );
+
+const HELIX_GOTO_WORD_HINT_ALPHABET: &[u8; 26] = b"abcdefghijklmnopqrstuvwxyz";
+const HELIX_GOTO_WORD_MAX_HINTS: usize =
+    HELIX_GOTO_WORD_HINT_ALPHABET.len() * HELIX_GOTO_WORD_HINT_ALPHABET.len();
+
+struct HelixGotoWordPlaceholderType;
+
+#[derive(Clone, Copy)]
+struct HelixGotoWordTarget {
+    word_start_offset: MultiBufferOffset,
+    replacement_end_offset: MultiBufferOffset,
+}
+
+fn helix_goto_word_hint_label(index: usize) -> Option<[char; 2]> {
+    if index >= HELIX_GOTO_WORD_MAX_HINTS {
+        return None;
+    }
+    let first = HELIX_GOTO_WORD_HINT_ALPHABET[index / HELIX_GOTO_WORD_HINT_ALPHABET.len()] as char;
+    let second = HELIX_GOTO_WORD_HINT_ALPHABET[index % HELIX_GOTO_WORD_HINT_ALPHABET.len()] as char;
+    Some([first, second])
+}
+
+fn helix_goto_word_input_char(text: &str) -> Option<char> {
+    let mut chars = text.chars();
+    let character = chars.next()?.to_ascii_lowercase();
+    if character.is_ascii_lowercase() {
+        Some(character)
+    } else {
+        None
+    }
+}
 
 pub fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
     Vim::action(editor, cx, Vim::helix_select_lines);
@@ -110,6 +145,17 @@ pub fn register(editor: &mut Editor, cx: &mut Context<Vim>) {
 }
 
 impl Vim {
+    fn clear_helix_goto_word_folds(editor: &mut Editor, cx: &mut Context<Editor>) {
+        let snapshot = editor.display_snapshot(cx);
+        let document_end_offset = snapshot.buffer_snapshot().len();
+        editor.remove_folds_with_type(
+            &[MultiBufferOffset(0)..document_end_offset],
+            TypeId::of::<HelixGotoWordPlaceholderType>(),
+            false,
+            cx,
+        );
+    }
+
     pub fn helix_normal_motion(
         &mut self,
         motion: Motion,
@@ -682,6 +728,276 @@ impl Vim {
         cx: &mut Context<Self>,
     ) {
         self.jump(".".into(), false, false, window, cx);
+    }
+
+    pub(crate) fn start_helix_goto_word(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.push_operator(Operator::HelixGotoWord { first_char: None }, window, cx);
+        if self.refresh_helix_goto_word_hints(None, window, cx) == 0 {
+            self.clear_operator(window, cx);
+        }
+    }
+
+    pub(crate) fn clear_helix_goto_word_hints(&mut self, cx: &mut Context<Self>) {
+        self.update_editor(cx, |_, editor, cx| {
+            Self::clear_helix_goto_word_folds(editor, cx);
+        });
+    }
+
+    pub(crate) fn helix_goto_word_input(
+        &mut self,
+        first_char: Option<char>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input_char) = helix_goto_word_input_char(text) else {
+            self.clear_operator(window, cx);
+            return;
+        };
+
+        if let Some(first_char) = first_char {
+            let jump_target = self
+                .update_editor(cx, |_, editor, cx| {
+                    Self::helix_goto_word_offset_for_label(
+                        editor, window, cx, first_char, input_char,
+                    )
+                })
+                .flatten();
+            if let Some(jump_target) = jump_target {
+                self.update_editor(cx, |_, editor, cx| {
+                    editor.create_nav_history_entry(cx);
+                    let display_snapshot = editor.display_snapshot(cx);
+                    let anchor = display_snapshot
+                        .buffer_snapshot()
+                        .anchor_before(jump_target);
+                    editor.change_selections(Default::default(), window, cx, |s| {
+                        s.select_anchor_ranges(vec![anchor..anchor]);
+                    });
+                });
+            }
+            self.clear_operator(window, cx);
+            return;
+        }
+
+        self.pop_operator(window, cx);
+        self.push_operator(
+            Operator::HelixGotoWord {
+                first_char: Some(input_char),
+            },
+            window,
+            cx,
+        );
+
+        if self.refresh_helix_goto_word_hints(Some(input_char), window, cx) == 0 {
+            self.clear_operator(window, cx);
+        }
+    }
+
+    fn refresh_helix_goto_word_hints(
+        &mut self,
+        first_char_filter: Option<char>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        self.update_editor(cx, |_, editor, cx| {
+            Self::clear_helix_goto_word_folds(editor, cx);
+
+            let targets = Self::helix_goto_word_targets(editor, window, cx);
+            let mut creases = Vec::new();
+
+            for (index, target) in targets.into_iter().enumerate() {
+                let Some([first_char, second_char]) = helix_goto_word_hint_label(index) else {
+                    break;
+                };
+                if let Some(first_char_filter) = first_char_filter
+                    && first_char_filter != first_char
+                {
+                    continue;
+                }
+
+                let label = format!("{first_char}{second_char}");
+                let placeholder = FoldPlaceholder {
+                    render: Arc::new({
+                        let label = label.clone();
+                        move |_fold_id, _fold_range, cx: &mut gpui::App| {
+                            use gpui::{Element as _, ParentElement as _, Styled as _};
+                            use settings::Settings as _;
+                            use theme::ThemeSettings;
+                            gpui::div()
+                                .font(ThemeSettings::get_global(cx).buffer_font.clone())
+                                .text_color(cx.theme().status().hint)
+                                .child(label.clone())
+                                .into_any()
+                        }
+                    }),
+                    collapsed_text: Some(label.into()),
+                    constrain_width: true,
+                    merge_adjacent: false,
+                    type_tag: Some(TypeId::of::<HelixGotoWordPlaceholderType>()),
+                    ..Default::default()
+                };
+                creases.push(Crease::simple(
+                    target.word_start_offset..target.replacement_end_offset,
+                    placeholder,
+                ));
+            }
+
+            let hint_count = creases.len();
+            editor.fold_creases(creases, false, window, cx);
+            hint_count
+        })
+        .unwrap_or_default()
+    }
+
+    fn helix_goto_word_offset_for_label(
+        editor: &Editor,
+        window: &mut Window,
+        cx: &mut Context<Editor>,
+        first_char: char,
+        second_char: char,
+    ) -> Option<MultiBufferOffset> {
+        Self::helix_goto_word_targets(editor, window, cx)
+            .into_iter()
+            .enumerate()
+            .find_map(|(index, target)| {
+                let [label_first, label_second] = helix_goto_word_hint_label(index)?;
+                if label_first == first_char && label_second == second_char {
+                    Some(target.word_start_offset)
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn helix_goto_word_targets(
+        editor: &Editor,
+        window: &mut Window,
+        cx: &mut Context<Editor>,
+    ) -> Vec<HelixGotoWordTarget> {
+        let display_snapshot = editor.display_snapshot(cx);
+        let text_layout_details = editor.text_layout_details(window, cx);
+        let first_visible_line = text_layout_details
+            .scroll_anchor
+            .scroll_top_display_point(&display_snapshot);
+        let first_visible_row = first_visible_line.row().0;
+        let max_row = display_snapshot.max_point().row().0;
+        let visible_row_count = text_layout_details
+            .visible_rows
+            .map(|rows| rows.ceil().max(0.0) as u32)
+            .unwrap_or(0);
+        let last_visible_row = first_visible_row
+            .saturating_add(visible_row_count)
+            .saturating_add(1)
+            .min(max_row);
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let mut targets: Vec<HelixGotoWordTarget> = Vec::new();
+
+        for row in first_visible_row..=last_visible_row {
+            let display_row = DisplayRow(row);
+            let line_len = display_snapshot.line_len(display_row);
+            if line_len == 0 {
+                continue;
+            }
+
+            let row_start = DisplayPoint::new(display_row, 0);
+            let row_end = DisplayPoint::new(display_row, line_len);
+            let row_start_offset = row_start
+                .to_point(&display_snapshot)
+                .to_offset(&buffer_snapshot);
+            let row_end_offset = row_end
+                .to_point(&display_snapshot)
+                .to_offset(&buffer_snapshot);
+            if row_start_offset >= row_end_offset {
+                continue;
+            }
+
+            let classifier =
+                buffer_snapshot.char_classifier_at(row_start.to_point(&display_snapshot));
+            let mut current_offset = row_start_offset;
+            let mut previous_character = if current_offset > MultiBufferOffset(0) {
+                buffer_snapshot.reversed_chars_at(current_offset).next()
+            } else {
+                None
+            };
+            let mut previous_kind = previous_character
+                .map(|character| classifier.kind_with(character, false))
+                .unwrap_or(CharKind::Whitespace);
+
+            for current_character in buffer_snapshot.chars_at(row_start_offset) {
+                if current_offset >= row_end_offset {
+                    break;
+                }
+
+                let current_kind = classifier.kind_with(current_character, false);
+                let crossed_newline = previous_character
+                    .map(|previous_character| {
+                        (previous_character == '\n') ^ (current_character == '\n')
+                    })
+                    .unwrap_or(false);
+                let is_word_start =
+                    current_kind == CharKind::Word
+                        && (previous_kind != CharKind::Word || crossed_newline);
+                if is_word_start
+                    && targets.last().map(|target| target.word_start_offset) != Some(current_offset)
+                {
+                    if let Some(previous_target) = targets.last()
+                        && current_offset < previous_target.replacement_end_offset
+                    {
+                        previous_character = Some(current_character);
+                        previous_kind = current_kind;
+                        current_offset += current_character.len_utf8();
+                        continue;
+                    }
+
+                    let mut characters_after_start = buffer_snapshot.chars_at(current_offset);
+                    let Some(first_character) = characters_after_start.next() else {
+                        previous_character = Some(current_character);
+                        previous_kind = current_kind;
+                        current_offset += current_character.len_utf8();
+                        continue;
+                    };
+                    let Some(second_character) = characters_after_start.next() else {
+                        previous_character = Some(current_character);
+                        previous_kind = current_kind;
+                        current_offset += current_character.len_utf8();
+                        continue;
+                    };
+                    if classifier.kind_with(second_character, false) != CharKind::Word {
+                        previous_character = Some(current_character);
+                        previous_kind = current_kind;
+                        current_offset += current_character.len_utf8();
+                        continue;
+                    }
+
+                    let replacement_end_offset = current_offset
+                        + first_character.len_utf8()
+                        + second_character.len_utf8();
+                    if replacement_end_offset > row_end_offset {
+                        previous_character = Some(current_character);
+                        previous_kind = current_kind;
+                        current_offset += current_character.len_utf8();
+                        continue;
+                    }
+                    targets.push(HelixGotoWordTarget {
+                        word_start_offset: current_offset,
+                        replacement_end_offset,
+                    });
+                    if targets.len() >= HELIX_GOTO_WORD_MAX_HINTS {
+                        break;
+                    }
+                }
+
+                previous_character = Some(current_character);
+                previous_kind = current_kind;
+                current_offset += current_character.len_utf8();
+            }
+
+            if targets.len() >= HELIX_GOTO_WORD_MAX_HINTS {
+                break;
+            }
+        }
+
+        targets
     }
 
     pub fn helix_select_lines(
@@ -1492,6 +1808,38 @@ mod test {
         cx.set_state("ˇone two", Mode::HelixNormal);
         cx.simulate_keystrokes("v w");
         cx.assert_state("«one ˇ»two", Mode::HelixSelect);
+    }
+
+    #[gpui::test]
+    async fn test_helix_goto_word_jump(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+
+        cx.set_state("ˇalpha bravo charlie delta", Mode::HelixNormal);
+        cx.simulate_keystrokes("g w a c");
+        cx.assert_state("alpha bravo ˇcharlie delta", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
+    async fn test_helix_goto_word_cancels_when_prefix_has_no_targets(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+
+        cx.set_state("ˇalpha bravo charlie delta", Mode::HelixNormal);
+        cx.simulate_keystrokes("g w z");
+        cx.assert_state("ˇalpha bravo charlie delta", Mode::HelixNormal);
+    }
+
+    #[gpui::test]
+    async fn test_helix_goto_word_skips_single_character_targets(cx: &mut gpui::TestAppContext) {
+        let mut cx = VimTestContext::new(cx, true).await;
+        cx.enable_helix();
+
+        cx.set_state("ˇa bb c ddd", Mode::HelixNormal);
+        cx.simulate_keystrokes("g w a b");
+        cx.assert_state("a bb c ˇddd", Mode::HelixNormal);
     }
 
     #[gpui::test]

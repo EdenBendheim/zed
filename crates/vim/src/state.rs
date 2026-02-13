@@ -147,6 +147,9 @@ pub enum Operator {
         replaced_char: Option<char>,
     },
     HelixSurroundDelete,
+    HelixGotoWord {
+        first_char: Option<char>,
+    },
 }
 
 #[derive(Default, Clone, Debug)]
@@ -1054,6 +1057,7 @@ impl Operator {
             Operator::HelixSurroundAdd => "helix_ms",
             Operator::HelixSurroundReplace { .. } => "helix_mr",
             Operator::HelixSurroundDelete => "helix_md",
+            Operator::HelixGotoWord { .. } => "helix_goto_word",
         }
     }
 
@@ -1086,6 +1090,10 @@ impl Operator {
                 replaced_char: Some(c),
             } => format!("mr{}", c),
             Operator::HelixSurroundDelete => "md".to_string(),
+            Operator::HelixGotoWord {
+                first_char: Some(first_char),
+            } => format!("gw{}", first_char),
+            Operator::HelixGotoWord { first_char: None } => "gw".to_string(),
             _ => self.id().to_string(),
         }
     }
@@ -1105,6 +1113,7 @@ impl Operator {
             | Operator::Replace
             | Operator::Digraph { .. }
             | Operator::Literal { .. }
+            | Operator::HelixGotoWord { .. }
             | Operator::ChangeSurrounds {
                 target: Some(_), ..
             }
@@ -1178,6 +1187,7 @@ impl Operator {
             | Operator::RecordRegister
             | Operator::ReplayRegister
             | Operator::HelixMatch => false,
+            Operator::HelixGotoWord { .. } => false,
         }
     }
 }
