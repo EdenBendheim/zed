@@ -540,7 +540,7 @@
       "]": ["vim::PushHelixNext", { "around": true }],
       "[": ["vim::PushHelixPrevious", { "around": true }],
       "g q": "vim::PushRewrap",
-      "g w": "vim::PushRewrap", // not a helix default & clashes with helix `goto_word`
+      "g w": "vim::PushHelixGotoWord",
     },
   },
   {

@@ -261,6 +261,8 @@ actions!(
         PushHelixSurroundReplace,
         /// Deletes surrounding characters in Helix mode.
         PushHelixSurroundDelete,
+        /// Starts Helix goto-word hint mode.
+        PushHelixGotoWord,
     ]
 );
 
@@ -930,6 +932,9 @@ impl Vim {
                     window,
                     cx,
                 );
+            });
+            Vim::action(editor, cx, |vim, _: &PushHelixGotoWord, window, cx| {
+                vim.start_helix_goto_word(window, cx);
             });
 
             Vim::action(
@@ -1708,6 +1713,7 @@ impl Vim {
         Vim::take_count(cx);
         Vim::take_forced_motion(cx);
         self.selected_register.take();
+        self.clear_helix_goto_word_hints(cx);
         self.operator_stack.clear();
         self.sync_vim_settings(window, cx);
     }
@@ -2026,6 +2032,9 @@ impl Vim {
                 }
             },
             Some(Operator::Jump { line }) => self.jump(text, line, true, window, cx),
+            Some(Operator::HelixGotoWord { first_char }) => {
+                self.helix_goto_word_input(first_char, &text, window, cx)
+            }
             _ => {
                 if self.mode == Mode::Replace {
                     self.multi_replace(text, window, cx)
