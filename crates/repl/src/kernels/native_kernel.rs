@@ -14,6 +14,7 @@ use project::Fs;
 use runtimelib::{RuntimeError, dirs};
 use smol::{net::TcpListener, process::Command};
 use std::{
+    collections::HashSet,
     env,
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -444,6 +445,42 @@ async fn read_kernels_dir(path: PathBuf, fs: &dyn Fs) -> Result<Vec<LocalKernelS
     Ok(valid_kernelspecs)
 }
 
+async fn kernelspec_dirs_from_jupyter_cli() -> Vec<PathBuf> {
+    let output = util::command::new_smol_command("jupyter")
+        .args(["kernelspec", "list", "--json"])
+        .output()
+        .await;
+
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        return Vec::new();
+    };
+
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&stdout) else {
+        return Vec::new();
+    };
+
+    parsed
+        .get("kernelspecs")
+        .and_then(|kernelspecs| kernelspecs.as_object())
+        .map(|kernelspecs| {
+            kernelspecs
+                .values()
+                .filter_map(|value| value.get("resource_dir"))
+                .filter_map(|resource_dir| resource_dir.as_str())
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
 pub async fn local_kernel_specifications(fs: Arc<dyn Fs>) -> Result<Vec<LocalKernelSpecification>> {
     let mut data_dirs = dirs::data_dirs();
 
@@ -478,14 +515,23 @@ pub async fn local_kernel_specifications(fs: Arc<dyn Fs>) -> Result<Vec<LocalKer
         .map(|path| read_kernels_dir(path, fs.as_ref()))
         .collect::<Vec<_>>();
 
-    let kernel_dirs = futures::future::join_all(kernel_dirs).await;
-    let kernel_dirs = kernel_dirs
+    let mut kernels = futures::future::join_all(kernel_dirs)
+        .await
         .into_iter()
         .filter_map(Result::ok)
         .flatten()
         .collect::<Vec<_>>();
 
-    Ok(kernel_dirs)
+    for kernelspec_dir in kernelspec_dirs_from_jupyter_cli().await {
+        if let Ok(kernelspec) = read_kernelspec_at(kernelspec_dir, fs.as_ref()).await {
+            kernels.push(kernelspec);
+        }
+    }
+
+    let mut seen_paths = HashSet::new();
+    kernels.retain(|kernelspec| seen_paths.insert(kernelspec.path.clone()));
+
+    Ok(kernels)
 }
 
 #[cfg(test)]

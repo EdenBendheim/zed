@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Build a local side-by-side Zed app and install it under a custom name.
+# Defaults are tuned for local iteration speed.
+
+usage() {
+  cat <<'USAGE'
+Usage: script/build-zed-custom-mac [options]
+
+Options:
+  --name <name>       App name to install (default: Zed-Custom)
+  --release           Build a release bundle (slower, optimized)
+  --debug             Build a debug bundle (faster; default)
+  --install-dir <dir> Install directory (default: ~/Applications)
+  --open              Open the installed app after install
+  -h, --help          Show this help
+
+Examples:
+  script/build-zed-custom-mac
+  script/build-zed-custom-mac --release --name "Zed-Custom"
+USAGE
+}
+
+app_name="Zed-Custom"
+install_dir="$HOME/Applications"
+mode="debug"
+open_app="false"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --name)
+      app_name="$2"
+      shift 2
+      ;;
+    --release)
+      mode="release"
+      shift
+      ;;
+    --debug)
+      mode="debug"
+      shift
+      ;;
+    --install-dir)
+      install_dir="$2"
+      shift 2
+      ;;
+    --open)
+      open_app="true"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "This script currently supports macOS only." >&2
+  exit 1
+fi
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+target_triple="$(rustc --version --verbose | awk '/^host:/{print $2}')"
+channel="$(<crates/zed/RELEASE_CHANNEL)"
+export ZED_RELEASE_CHANNEL="${channel}"
+export ZED_BUNDLE=true
+
+build_flag=""
+if [[ "$mode" == "release" ]]; then
+  build_flag="--release"
+fi
+
+cargo_bundle_version="$(cargo -q bundle --help 2>&1 | head -n 1 || echo "")"
+if [[ "$cargo_bundle_version" != "cargo-bundle v0.6.1-zed" ]]; then
+  cargo install cargo-bundle --git https://github.com/zed-industries/cargo-bundle.git --branch zed-deploy
+fi
+
+export CXXFLAGS="-stdlib=libc++"
+rustup target add "$target_triple"
+script/generate-licenses
+
+cargo build ${build_flag} --package zed --package cli --target "$target_triple"
+cargo build ${build_flag} --package remote_server --target "$target_triple"
+
+pushd crates/zed >/dev/null
+cp Cargo.toml Cargo.toml.custom-backup
+cleanup() {
+  if [[ -f Cargo.toml.custom-backup ]]; then
+    mv Cargo.toml.custom-backup Cargo.toml
+  fi
+}
+trap cleanup EXIT
+sed -i.bak "s/package.metadata.bundle-${channel}/package.metadata.bundle/" Cargo.toml
+rm -f Cargo.toml.bak
+app_path="$(cargo bundle ${build_flag} --target "$target_triple" --select-workspace-root | xargs)"
+cleanup
+trap - EXIT
+popd >/dev/null
+
+document_icon_source="crates/zed/resources/Document.icns"
+document_icon_target="${app_path}/Contents/Resources/Document.icns"
+if [[ -f "${document_icon_source}" ]]; then
+  mkdir -p "$(dirname "${document_icon_target}")"
+  cp "${document_icon_source}" "${document_icon_target}"
+fi
+
+source_app=""
+if [[ -d "$app_path" ]]; then
+  source_app="$app_path"
+fi
+
+if [[ -z "$source_app" ]]; then
+  echo "Could not locate bundled .app output." >&2
+  exit 1
+fi
+
+mkdir -p "$install_dir"
+installed_app="${install_dir}/${app_name}.app"
+rm -rf "$installed_app"
+cp -R "$source_app" "$installed_app"
+
+plist="${installed_app}/Contents/Info.plist"
+if [[ -f "$plist" ]]; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName ${app_name}" "$plist" \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleName string ${app_name}" "$plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ${app_name}" "$plist" \
+    || /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string ${app_name}" "$plist"
+fi
+
+codesign --force --deep --sign - "$installed_app" >/dev/null 2>&1 || true
+
+echo "Installed: ${installed_app}"
+echo "Build mode: ${mode}"
+
+echo "Tip: after pulling updates, rerun this script to refresh your custom app."
+
+if [[ "$open_app" == "true" ]]; then
+  open "$installed_app"
+fi

@@ -107,15 +107,24 @@ fn convert_outputs(
     outputs
         .iter()
         .map(|output| match output {
-            nbformat::v4::Output::Stream { text, .. } => Output::Stream {
+            nbformat::v4::Output::Stream { name, text } => Output::Stream {
                 content: cx.new(|cx| TerminalOutput::from(&text.0, window, cx)),
+                name: name.clone(),
             },
-            nbformat::v4::Output::DisplayData(display_data) => {
-                Output::new(&display_data.data, None, window, cx)
-            }
-            nbformat::v4::Output::ExecuteResult(execute_result) => {
-                Output::new(&execute_result.data, None, window, cx)
-            }
+            nbformat::v4::Output::DisplayData(display_data) => Output::new(
+                &display_data.data,
+                display_data.metadata.clone(),
+                None,
+                window,
+                cx,
+            ),
+            nbformat::v4::Output::ExecuteResult(execute_result) => Output::new(
+                &execute_result.data,
+                execute_result.metadata.clone(),
+                None,
+                window,
+                cx,
+            ),
             nbformat::v4::Output::Error(error) => Output::ErrorOutput(ErrorView {
                 ename: error.ename.clone(),
                 evalue: error.evalue.clone(),
@@ -171,7 +180,7 @@ impl Cell {
                 id,
                 metadata,
                 source,
-                ..
+                attachments,
             } => {
                 let source = source.join("");
 
@@ -179,6 +188,7 @@ impl Cell {
                     MarkdownCell::new(
                         id.clone(),
                         metadata.clone(),
+                        attachments.clone(),
                         source,
                         languages.clone(),
                         window,
@@ -320,6 +330,7 @@ pub trait RunnableCell: RenderableCell {
 pub struct MarkdownCell {
     id: CellId,
     metadata: CellMetadata,
+    attachments: Option<serde_json::Value>,
     image_cache: Entity<RetainAllImageCache>,
     source: String,
     editor: Entity<Editor>,
@@ -337,6 +348,7 @@ impl MarkdownCell {
     pub fn new(
         id: CellId,
         metadata: CellMetadata,
+        attachments: Option<serde_json::Value>,
         source: String,
         languages: Arc<LanguageRegistry>,
         window: &mut Window,
@@ -370,7 +382,6 @@ impl MarkdownCell {
             let theme = ThemeSettings::get_global(cx);
             let refinement = TextStyleRefinement {
                 font_family: Some(theme.buffer_font.family.clone()),
-                font_size: Some(theme.buffer_font_size(cx).into()),
                 color: Some(cx.theme().colors().editor_foreground),
                 background_color: Some(gpui::transparent_black()),
                 ..Default::default()
@@ -400,6 +411,7 @@ impl MarkdownCell {
         Self {
             id,
             metadata,
+            attachments,
             image_cache: RetainAllImageCache::new(cx),
             source,
             editor,
@@ -437,7 +449,7 @@ impl MarkdownCell {
             id: self.id.clone(),
             metadata: self.metadata.clone(),
             source: source_lines,
-            attachments: None,
+            attachments: self.attachments.clone(),
         }
     }
 
@@ -579,8 +591,8 @@ impl Render for MarkdownCell {
                             .size_full()
                             .flex_1()
                             .p_3()
-                            .font_ui(cx)
-                            .text_size(TextSize::Default.rems(cx))
+                            .font_buffer(cx)
+                            .text_buffer(cx)
                             .cursor_pointer()
                             .on_click(cx.listener(|this, _event, window, cx| {
                                 this.editing = true;
@@ -607,6 +619,7 @@ pub struct CodeCell {
     execution_start_time: Option<Instant>,
     execution_duration: Option<Duration>,
     is_executing: bool,
+    outputs_dirty: bool,
 }
 
 impl EventEmitter<CellEvent> for CodeCell {}
@@ -638,7 +651,6 @@ impl CodeCell {
             let theme = ThemeSettings::get_global(cx);
             let refinement = TextStyleRefinement {
                 font_family: Some(theme.buffer_font.family.clone()),
-                font_size: Some(theme.buffer_font_size(cx).into()),
                 color: Some(cx.theme().colors().editor_foreground),
                 background_color: Some(gpui::transparent_black()),
                 ..Default::default()
@@ -669,6 +681,7 @@ impl CodeCell {
             execution_start_time: None,
             execution_duration: None,
             is_executing: false,
+            outputs_dirty: false,
         }
     }
 
@@ -713,7 +726,6 @@ impl CodeCell {
             let theme = ThemeSettings::get_global(cx);
             let refinement = TextStyleRefinement {
                 font_family: Some(theme.buffer_font.family.clone()),
-                font_size: Some(theme.buffer_font_size(cx).into()),
                 color: Some(cx.theme().colors().editor_foreground),
                 background_color: Some(gpui::transparent_black()),
                 ..Default::default()
@@ -745,6 +757,7 @@ impl CodeCell {
             execution_start_time: None,
             execution_duration: None,
             is_executing: false,
+            outputs_dirty: false,
         }
     }
 
@@ -762,7 +775,11 @@ impl CodeCell {
     }
 
     pub fn is_dirty(&self, cx: &App) -> bool {
-        self.editor.read(cx).buffer().read(cx).is_dirty(cx)
+        self.editor.read(cx).buffer().read(cx).is_dirty(cx) || self.outputs_dirty
+    }
+
+    pub fn mark_saved(&mut self) {
+        self.outputs_dirty = false;
     }
 
     pub fn to_nbformat_cell(&self, cx: &App) -> nbformat::v4::Cell {
@@ -792,8 +809,16 @@ impl CodeCell {
     }
 
     pub fn clear_outputs(&mut self) {
+        if !self.outputs.is_empty() || self.execution_count.is_some() {
+            self.outputs_dirty = true;
+        }
         self.outputs.clear();
         self.execution_duration = None;
+    }
+
+    pub fn push_message_output(&mut self, message: impl Into<String>) {
+        self.outputs.push(Output::Message(message.into()));
+        self.outputs_dirty = true;
     }
 
     pub fn start_execution(&mut self) {
@@ -838,26 +863,61 @@ impl CodeCell {
     ) {
         match &message.content {
             JupyterMessageContent::StreamContent(stream) => {
+                let stream_name = match &stream.name {
+                    jupyter_protocol::Stdio::Stdout => "stdout",
+                    jupyter_protocol::Stdio::Stderr => "stderr",
+                };
                 self.outputs.push(Output::Stream {
                     content: cx.new(|cx| TerminalOutput::from(&stream.text, window, cx)),
+                    name: stream_name.to_string(),
                 });
+                self.outputs_dirty = true;
             }
             JupyterMessageContent::DisplayData(display_data) => {
+                let metadata = serde_json::to_value(&display_data.metadata)
+                    .ok()
+                    .and_then(|value| value.as_object().cloned())
+                    .unwrap_or_default();
                 self.outputs
-                    .push(Output::new(&display_data.data, None, window, cx));
+                    .push(Output::new(&display_data.data, metadata, None, window, cx));
+                self.outputs_dirty = true;
             }
             JupyterMessageContent::ExecuteResult(execute_result) => {
-                self.outputs
-                    .push(Output::new(&execute_result.data, None, window, cx));
+                let metadata = serde_json::to_value(&execute_result.metadata)
+                    .ok()
+                    .and_then(|value| value.as_object().cloned())
+                    .unwrap_or_default();
+                self.outputs.push(Output::new(
+                    &execute_result.data,
+                    metadata,
+                    None,
+                    window,
+                    cx,
+                ));
+                self.outputs_dirty = true;
             }
             JupyterMessageContent::ExecuteInput(input) => {
                 self.execution_count = serde_json::to_value(&input.execution_count)
                     .ok()
                     .and_then(|v| v.as_i64())
                     .map(|v| v as i32);
+                self.outputs_dirty = true;
             }
             JupyterMessageContent::ExecuteReply(_) => {
                 self.finish_execution();
+            }
+            JupyterMessageContent::ClearOutput(options) => {
+                if options.wait {
+                    self.outputs.push(Output::ClearOutputWaitMarker);
+                    self.outputs_dirty = true;
+                } else {
+                    self.clear_outputs();
+                }
+            }
+            JupyterMessageContent::Status(status) => {
+                if status.execution_state == runtimelib::ExecutionState::Idle && self.is_executing {
+                    self.finish_execution();
+                }
             }
             JupyterMessageContent::ErrorOutput(error) => {
                 self.outputs.push(Output::ErrorOutput(ErrorView {
@@ -866,6 +926,7 @@ impl CodeCell {
                     traceback: cx
                         .new(|cx| TerminalOutput::from(&error.traceback.join("\n"), window, cx)),
                 }));
+                self.outputs_dirty = true;
             }
             _ => {}
         }
@@ -1032,7 +1093,6 @@ impl RenderableCell for CodeCell {
 
 impl RunnableCell for CodeCell {
     fn run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        println!("Running code cell: {}", self.id);
         cx.emit(CellEvent::Run(self.id.clone()));
     }
 

@@ -343,7 +343,7 @@ Several features that require plugins in PyCharm are built into Zed:
 
 To set expectations clearly, here's what PyCharm offers that Zed doesn't have:
 
-- **Scientific Mode / Jupyter integration** — For notebooks and data science workflows, use JupyterLab or VS Code with the Jupyter extension alongside Zed for your Python editing
+- **Scientific Mode parity** — Zed supports REPL workflows and notebook editing, but advanced notebook ecosystem features (for example, full widget-driven workflows) are still better in JupyterLab
 - **Database tools** — Use DataGrip, DBeaver, or TablePlus
 - **Django/Flask template navigation** — Use file search and grep
 - **Visual package manager** — Use pip, uv, or poetry from the terminal

@@ -44,6 +44,20 @@ The `repl: run` command will be executed on your selection(s), and the result wi
 
 Outputs can be cleared with the `repl: clear outputs` command, or from the REPL menu in the toolbar.
 
+### Notebook files (`.ipynb`)
+
+Notebook editing is available behind an opt-in setting:
+
+```json [settings]
+{
+  "jupyter": {
+    "notebooks_enabled": true
+  }
+}
+```
+
+After enabling it, opening an `.ipynb` file will use Zed's notebook editor with code and markdown cells, kernel selection, and per-cell execution.
+
 ### Cell mode
 
 Zed supports [notebooks as scripts](https://jupytext.readthedocs.io/en/latest/formats-scripts.html) using the `# %%` cell separator in Python and `// %%` in TypeScript. This allows you to write code in a single file and run it as if it were a notebook, cell by cell.
@@ -152,6 +166,7 @@ language, you can assign a kernel for any supported language in your `settings.j
 ```json [settings]
 {
   "jupyter": {
+    "notebooks_enabled": true,
     "kernel_selections": {
       "python": "conda-env",
       "typescript": "deno",

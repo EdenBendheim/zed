@@ -7,6 +7,7 @@ use settings::{RegisterSetting, Settings};
 #[derive(Debug, Default, RegisterSetting)]
 pub struct JupyterSettings {
     pub kernel_selections: HashMap<String, String>,
+    pub notebooks_enabled: bool,
 }
 
 impl JupyterSettings {
@@ -16,6 +17,10 @@ impl JupyterSettings {
         // This allows the editor to set up context for key bindings/actions.
         EditorSettings::jupyter_enabled(cx)
     }
+
+    pub fn notebooks_enabled(cx: &App) -> bool {
+        EditorSettings::jupyter_notebooks_enabled(cx)
+    }
 }
 
 impl Settings for JupyterSettings {
@@ -23,6 +28,7 @@ impl Settings for JupyterSettings {
         let jupyter = content.editor.jupyter.clone().unwrap();
         Self {
             kernel_selections: jupyter.kernel_selections.unwrap_or_default(),
+            notebooks_enabled: jupyter.notebooks_enabled.unwrap_or(false),
         }
     }
 }

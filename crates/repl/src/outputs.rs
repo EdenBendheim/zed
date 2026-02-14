@@ -109,27 +109,38 @@ impl<V: OutputContent + 'static> OutputContent for Entity<V> {
 pub enum Output {
     Plain {
         content: Entity<TerminalOutput>,
+        data: MimeBundle,
+        metadata: serde_json::Map<String, serde_json::Value>,
         display_id: Option<String>,
     },
     Stream {
         content: Entity<TerminalOutput>,
+        name: String,
     },
     Image {
         content: Entity<ImageView>,
+        data: MimeBundle,
+        metadata: serde_json::Map<String, serde_json::Value>,
         display_id: Option<String>,
     },
     ErrorOutput(ErrorView),
     Message(String),
     Table {
         content: Entity<TableView>,
+        data: MimeBundle,
+        metadata: serde_json::Map<String, serde_json::Value>,
         display_id: Option<String>,
     },
     Markdown {
         content: Entity<MarkdownView>,
+        data: MimeBundle,
+        metadata: serde_json::Map<String, serde_json::Value>,
         display_id: Option<String>,
     },
     Json {
         content: Entity<JsonView>,
+        data: MimeBundle,
+        metadata: serde_json::Map<String, serde_json::Value>,
         display_id: Option<String>,
     },
     ClearOutputWaitMarker,
@@ -138,24 +149,19 @@ pub enum Output {
 impl Output {
     pub fn to_nbformat(&self, cx: &App) -> Option<nbformat::v4::Output> {
         match self {
-            Output::Stream { content } => {
+            Output::Stream { content, name } => {
                 let text = content.read(cx).full_text();
                 Some(nbformat::v4::Output::Stream {
-                    name: "stdout".to_string(),
+                    name: name.clone(),
                     text: nbformat::v4::MultilineString(text),
                 })
             }
-            Output::Plain { content, .. } => {
-                let text = content.read(cx).full_text();
-                let mut data = jupyter_protocol::media::Media::default();
-                data.content.push(jupyter_protocol::MediaType::Plain(text));
-                Some(nbformat::v4::Output::DisplayData(
-                    nbformat::v4::DisplayData {
-                        data,
-                        metadata: serde_json::Map::new(),
-                    },
-                ))
-            }
+            Output::Plain { data, metadata, .. } => Some(nbformat::v4::Output::DisplayData(
+                nbformat::v4::DisplayData {
+                    data: data.clone(),
+                    metadata: metadata.clone(),
+                },
+            )),
             Output::ErrorOutput(error_view) => {
                 let traceback_text = error_view.traceback.read(cx).full_text();
                 let traceback_lines: Vec<String> =
@@ -166,10 +172,15 @@ impl Output {
                     traceback: traceback_lines,
                 }))
             }
-            Output::Image { .. }
-            | Output::Markdown { .. }
-            | Output::Table { .. }
-            | Output::Json { .. } => None,
+            Output::Image { data, metadata, .. }
+            | Output::Markdown { data, metadata, .. }
+            | Output::Table { data, metadata, .. }
+            | Output::Json { data, metadata, .. } => Some(nbformat::v4::Output::DisplayData(
+                nbformat::v4::DisplayData {
+                    data: data.clone(),
+                    metadata: metadata.clone(),
+                },
+            )),
             Output::Message(_) => None,
             Output::ClearOutputWaitMarker => None,
         }
@@ -384,6 +395,7 @@ impl Output {
 
     pub fn new(
         data: &MimeBundle,
+        metadata: serde_json::Map<String, serde_json::Value>,
         display_id: Option<String>,
         window: &mut Window,
         cx: &mut App,
@@ -392,30 +404,42 @@ impl Output {
             Some(MimeType::Json(json_value)) => match JsonView::from_value(json_value.clone()) {
                 Ok(json_view) => Output::Json {
                     content: cx.new(|_| json_view),
+                    data: data.clone(),
+                    metadata,
                     display_id,
                 },
                 Err(_) => Output::Message("Failed to parse JSON".to_string()),
             },
             Some(MimeType::Plain(text)) => Output::Plain {
                 content: cx.new(|cx| TerminalOutput::from(text, window, cx)),
+                data: data.clone(),
+                metadata,
                 display_id,
             },
             Some(MimeType::Markdown(text)) => {
                 let content = cx.new(|cx| MarkdownView::from(text.clone(), cx));
                 Output::Markdown {
                     content,
+                    data: data.clone(),
+                    metadata,
                     display_id,
                 }
             }
-            Some(MimeType::Png(data)) | Some(MimeType::Jpeg(data)) => match ImageView::from(data) {
-                Ok(view) => Output::Image {
-                    content: cx.new(|_| view),
-                    display_id,
-                },
-                Err(error) => Output::Message(format!("Failed to load image: {}", error)),
-            },
-            Some(MimeType::DataTable(data)) => Output::Table {
-                content: cx.new(|cx| TableView::new(data, window, cx)),
+            Some(MimeType::Png(image_data)) | Some(MimeType::Jpeg(image_data)) => {
+                match ImageView::from(image_data) {
+                    Ok(view) => Output::Image {
+                        content: cx.new(|_| view),
+                        data: data.clone(),
+                        metadata,
+                        display_id,
+                    },
+                    Err(error) => Output::Message(format!("Failed to load image: {}", error)),
+                }
+            }
+            Some(MimeType::DataTable(table_data)) => Output::Table {
+                content: cx.new(|cx| TableView::new(table_data, window, cx)),
+                data: data.clone(),
+                metadata,
                 display_id,
             },
             // Any other media types are not supported
@@ -477,19 +501,33 @@ impl ExecutionView {
         let output: Output = match message {
             JupyterMessageContent::ExecuteResult(result) => Output::new(
                 &result.data,
+                serde_json::to_value(&result.metadata)
+                    .ok()
+                    .and_then(|value| value.as_object().cloned())
+                    .unwrap_or_default(),
                 result.transient.as_ref().and_then(|t| t.display_id.clone()),
                 window,
                 cx,
             ),
             JupyterMessageContent::DisplayData(result) => Output::new(
                 &result.data,
+                serde_json::to_value(&result.metadata)
+                    .ok()
+                    .and_then(|value| value.as_object().cloned())
+                    .unwrap_or_default(),
                 result.transient.as_ref().and_then(|t| t.display_id.clone()),
                 window,
                 cx,
             ),
             JupyterMessageContent::StreamContent(result) => {
+                let stream_name = match &result.name {
+                    jupyter_protocol::Stdio::Stdout => "stdout",
+                    jupyter_protocol::Stdio::Stderr => "stderr",
+                };
                 // Previous stream data will combine together, handling colors, carriage returns, etc
-                if let Some(new_terminal) = self.apply_terminal_text(&result.text, window, cx) {
+                if let Some(new_terminal) =
+                    self.apply_terminal_text(stream_name, &result.text, window, cx)
+                {
                     new_terminal
                 } else {
                     return;
@@ -508,7 +546,7 @@ impl ExecutionView {
             JupyterMessageContent::ExecuteReply(reply) => {
                 for payload in reply.payload.iter() {
                     if let runtimelib::Payload::Page { data, .. } = payload {
-                        let output = Output::new(data, None, window, cx);
+                        let output = Output::new(data, serde_json::Map::new(), None, window, cx);
                         self.outputs.push(output);
                     }
                 }
@@ -571,6 +609,7 @@ impl ExecutionView {
     pub fn update_display_data(
         &mut self,
         data: &MimeBundle,
+        metadata: serde_json::Map<String, serde_json::Value>,
         display_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -581,7 +620,13 @@ impl ExecutionView {
             if let Some(other_display_id) = output.display_id().as_ref()
                 && other_display_id == display_id
             {
-                *output = Output::new(data, Some(display_id.to_owned()), window, cx);
+                *output = Output::new(
+                    data,
+                    metadata.clone(),
+                    Some(display_id.to_owned()),
+                    window,
+                    cx,
+                );
                 any = true;
             }
         });
@@ -622,6 +667,7 @@ impl ExecutionView {
 
     fn apply_terminal_text(
         &mut self,
+        stream_name: &str,
         text: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -629,7 +675,9 @@ impl ExecutionView {
         if let Some(last_output) = self.outputs.last_mut()
             && let Output::Stream {
                 content: last_stream,
+                name,
             } = last_output
+            && name == stream_name
         {
             // Don't need to add a new output, we already have a terminal output
             // and can just update the most recent terminal output
@@ -642,6 +690,7 @@ impl ExecutionView {
 
         Some(Output::Stream {
             content: cx.new(|cx| TerminalOutput::from(text, window, cx)),
+            name: stream_name.to_string(),
         })
     }
 }

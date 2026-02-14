@@ -867,7 +867,17 @@ impl KernelSession for Session {
 
                 self.blocks.iter_mut().for_each(|(_, block)| {
                     block.execution_view.update(cx, |execution_view, cx| {
-                        execution_view.update_display_data(&update.data, &display_id, window, cx);
+                        let metadata = serde_json::to_value(&update.metadata)
+                            .ok()
+                            .and_then(|value| value.as_object().cloned())
+                            .unwrap_or_default();
+                        execution_view.update_display_data(
+                            &update.data,
+                            metadata,
+                            &display_id,
+                            window,
+                            cx,
+                        );
                     });
                 });
                 return;

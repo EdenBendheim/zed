@@ -5,6 +5,13 @@
 
 Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
 
+### Custom Fork Notes
+
+This fork includes custom editor behavior and notebook work-in-progress:
+
+- Helix-mode `gw` jump hints for visible word starts (two-letter jump labels).
+- An in-progress custom IPython notebook (`.ipynb`) rendering path.
+
 ---
 
 ### Installation

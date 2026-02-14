@@ -839,6 +839,11 @@ pub struct JupyterContent {
     /// Default: true
     pub enabled: Option<bool>,
 
+    /// Whether `.ipynb` notebook editing is enabled.
+    ///
+    /// Default: false
+    pub notebooks_enabled: Option<bool>,
+
     /// Default kernels to select for each language.
     ///
     /// Default: `{}`

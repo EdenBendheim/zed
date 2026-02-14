@@ -67,6 +67,10 @@ pub struct Jupyter {
     ///
     /// Default: true
     pub enabled: bool,
+    /// Whether `.ipynb` notebook editing is enabled.
+    ///
+    /// Default: false
+    pub notebooks_enabled: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -181,6 +185,10 @@ impl EditorSettings {
     pub fn jupyter_enabled(cx: &App) -> bool {
         EditorSettings::get_global(cx).jupyter.enabled
     }
+
+    pub fn jupyter_notebooks_enabled(cx: &App) -> bool {
+        EditorSettings::get_global(cx).jupyter.notebooks_enabled
+    }
 }
 
 impl ScrollbarVisibility for EditorSettings {
@@ -200,6 +208,7 @@ impl Settings for EditorSettings {
         let search = editor.search.unwrap();
         let drag_and_drop_selection = editor.drag_and_drop_selection.unwrap();
         let sticky_scroll = editor.sticky_scroll.unwrap();
+        let jupyter = editor.jupyter.unwrap();
         Self {
             cursor_blink: editor.cursor_blink.unwrap(),
             cursor_shape: editor.cursor_shape.map(Into::into),
@@ -276,7 +285,8 @@ impl Settings for EditorSettings {
             show_signature_help_after_edits: editor.show_signature_help_after_edits.unwrap(),
             go_to_definition_fallback: editor.go_to_definition_fallback.unwrap(),
             jupyter: Jupyter {
-                enabled: editor.jupyter.unwrap().enabled.unwrap(),
+                enabled: jupyter.enabled.unwrap(),
+                notebooks_enabled: jupyter.notebooks_enabled.unwrap_or(false),
             },
             hide_mouse: editor.hide_mouse,
             snippet_sort_order: editor.snippet_sort_order.unwrap(),
